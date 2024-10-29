@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The growing demand for large language models (LLMs) across industries—from customer service chatbots to AI-driven content generation—has created the need for efficient and scalable back-end services. Traditional methods of deploying LLMs are resource-heavy, and existing solutions often lack features like streaming inference results. Our team aims to build a robust, efficient back-end inference service that leverages Rust's performance and safety. This project also contributes a streaming-enabled language model serving framework to developers with interests in machine learning.
+The growing demand for large language models (LLMs) across industries—from customer service chatbots to AI-driven content generation—has created the need for efficient, scalable back-end services. We aim to build a platform capable of serving multiple large language models with support for streaming, enhancing user experience by reducing the need to switch between models. Instead of delivering results all at once after the model completes its response, we plan to implement result streaming for an even smoother experience. Our team’s goal is to build a robust, efficient back-end inference service that leverages Rust’s performance and safety.
 
 ## Objective and Key Features
 
