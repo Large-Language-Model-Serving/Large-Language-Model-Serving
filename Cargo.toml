@@ -2,6 +2,16 @@
 name = "back-end-inference-service"
 version = "0.1.0"
 edition = "2021"
+default-run = "back-end-inference-service"
 
 [dependencies]
 actix-web = "4"
+candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.7.2" }
+candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.7.2" }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", version = "0.7.2" }
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git" }
+tokenizers = "0.20.1"
+serde_json = "1.0.132"
+tokio = "1.41.0"
+anyhow = "1.0.91"
+hf-hub = "0.3.2"

@@ -1,4 +1,8 @@
-/target
-/tests
+debug/
+data/
+dist/
+target/
+models/
+
 .DS_Store
 .vscode
