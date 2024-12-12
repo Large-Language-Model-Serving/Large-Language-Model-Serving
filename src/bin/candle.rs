@@ -15,10 +15,10 @@ extern crate intel_mkl_src;
 use anyhow::{bail, Error as E, Result};
 use clap::{Parser, ValueEnum};
 
-use candle_core::{Device, DType, Tensor};
+use candle_core::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use std::io::Write;
 
 use candle_transformers::models::llama as model;
@@ -69,7 +69,7 @@ struct Args {
     seed: u64,
 
     /// The length of the sample to generate (in tokens).
-    #[arg(short = 'n', long, default_value_t = 10000)]
+    #[arg(short = 'n', long, default_value_t = 100)]
     sample_len: usize,
 
     /// Disable the key-value cache.
@@ -112,19 +112,19 @@ struct Args {
 
 fn main() -> Result<()> {
     use tokenizers::Tokenizer;
-    // use tracing_chrome::ChromeLayerBuilder;
-    // use tracing_subscriber::prelude::*;
+    use tracing_chrome::ChromeLayerBuilder;
+    use tracing_subscriber::prelude::*;
 
-    // let args = Args::parse();
-    // let _guard = if args.tracing {
-    //     let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
-    //     tracing_subscriber::registry().with(chrome_layer).init();
-    //     Some(guard)
-    // } else {
-    //     None
-    // };
+    let args = Args::parse();
+    let _guard = if args.tracing {
+        let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
+        tracing_subscriber::registry().with(chrome_layer).init();
+        Some(guard)
+    } else {
+        None
+    };
 
-    let device = Device::Cpu;
+    let device = candle_core::Device::new_cuda(0)?;
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,
         Some("bf16") => DType::BF16,
@@ -133,33 +133,32 @@ fn main() -> Result<()> {
         None => DType::F16,
     };
     let (llama, tokenizer_filename, mut cache, config) = {
-        let api = Api::new()?;
-        // let model_id = args.model_id.unwrap_or_else(|| match args.which {
-        //     Which::V1 => "Narsil/amall-7b".to_string(),
-        //     Which::V2 => "meta-llama/Llama-2-7b-hf".to_string(),
-        //     Which::V3 => "meta-llama/Meta-Llama-3-8B".to_string(),
-        //     Which::V3Instruct => "meta-llama/Meta-Llama-3-8B-Instruct".to_string(),
-        //     Which::V31 => "meta-llama/Llama-3.1-8B".to_string(),
-        //     Which::V31Instruct => "meta-llama/Llama-3.1-8B-Instruct".to_string(),
-        //     Which::V32_1b => "meta-llama/Llama-3.2-1B".to_string(),
-        //     Which::V32_1bInstruct => "meta-llama/Llama-3.2-1B-Instruct".to_string(),
-        //     Which::V32_3b => "meta-llama/Llama-3.2-3B".to_string(),
-        //     Which::V32_3bInstruct => "meta-llama/Llama-3.2-3B-Instruct".to_string(),
-        //     Which::Solar10_7B => "upstage/SOLAR-10.7B-v1.0".to_string(),
-        //     Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-        // });
-        // println!("loading the model weights from {model_id}");
-        // let revision = args.revision.unwrap_or("main".to_string());
-        // let model_id = "meta-llama/Llama-3.2-3B-Instruct".to_string();
-        let repo = api.model("Llama-3.2-3B-Instruct".to_string());
-        let config_filename = repo.get("config.json").unwrap();
-        let tokenizer_filename = repo.get("tokenizer.json").unwrap();
+        let access_token = "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";   // Hugging Face Access Token
+        let api_builder = ApiBuilder::new();
+        let api_builder_token =  api_builder.with_token(Some(String::from(access_token)));
+        let api = api_builder_token.build()?;
+        let model_id = args.model_id.unwrap_or_else(|| match args.which {
+            Which::V1 => "Narsil/amall-7b".to_string(),
+            Which::V2 => "meta-llama/Llama-2-7b-hf".to_string(),
+            Which::V3 => "chuanli11/Llama-3.2-3B-Instruct-uncensored".to_string(),
+            Which::V3Instruct => "meta-llama/Meta-Llama-3-8B-Instruct".to_string(),
+            Which::V31 => "meta-llama/Llama-3.1-8B".to_string(),
+            Which::V31Instruct => "meta-llama/Llama-3.1-8B-Instruct".to_string(),
+            Which::V32_1b => "meta-llama/Llama-3.2-1B".to_string(),
+            Which::V32_1bInstruct => "meta-llama/Llama-3.2-1B-Instruct".to_string(),
+            Which::V32_3b => "meta-llama/Llama-3.2-3B".to_string(),
+            Which::V32_3bInstruct => "meta-llama/Llama-3.2-3B-Instruct".to_string(),
+            Which::Solar10_7B => "upstage/SOLAR-10.7B-v1.0".to_string(),
+            Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
+        });
+        println!("loading the model weights from {model_id}");
+        let revision = args.revision.unwrap_or("main".to_string());
         let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-        let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
-        let use_flash_attn = true;
-        let config = config.into_config(use_flash_attn);
 
-        // let config_filename = api.get("config.json")?;
+        let tokenizer_filename = api.get("tokenizer.json")?;
+        let config_filename = api.get("config.json")?;
+        let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
+        let config = config.into_config(args.use_flash_attn);
 
         let filenames = match args.which {
             Which::V1

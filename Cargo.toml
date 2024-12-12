@@ -6,12 +6,16 @@ default-run = "back-end-inference-service"
 
 [dependencies]
 actix-web = "4"
-candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.7.2" }
-candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.7.2" }
-candle-transformers = { git = "https://github.com/huggingface/candle.git", version = "0.7.2" }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git" }
-tokenizers = "0.20.1"
+msvc_spectre_libs = "0.1.2"
+clap = { version = "4.5.20", features = ["derive"] }
+candle-nn = { git = "https://github.com/huggingface/candle.git", features = ["cuda"]  }
+candle-core = { git = "https://github.com/huggingface/candle.git", features = ["cuda"] }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", features = ["cuda"]  }
+tokenizers = "0.19.1"
 serde_json = "1.0.132"
 tokio = "1.41.0"
 anyhow = "1.0.91"
 hf-hub = "0.3.2"
+tracing-chrome = "0.7.2"
+tracing-subscriber = "0.3.18"
+candle-examples = "0.7.2"
