@@ -18,7 +18,7 @@ use clap::{Parser, ValueEnum};
 use candle_core::{DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use std::io::Write;
 
 use candle_transformers::models::llama as model;
@@ -69,7 +69,7 @@ struct Args {
     seed: u64,
 
     /// The length of the sample to generate (in tokens).
-    #[arg(short = 'n', long, default_value_t = 10000)]
+    #[arg(short = 'n', long, default_value_t = 100)]
     sample_len: usize,
 
     /// Disable the key-value cache.
@@ -133,7 +133,10 @@ fn main() -> Result<()> {
         None => DType::F16,
     };
     let (llama, tokenizer_filename, mut cache, config) = {
-        let api = Api::new()?;
+        let access_token = "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";   // Hugging Face Access Token
+        let api_builder = ApiBuilder::new();
+        let api_builder_token =  api_builder.with_token(Some(String::from(access_token)));
+        let api = api_builder_token.build()?;
         let model_id = args.model_id.unwrap_or_else(|| match args.which {
             Which::V1 => "Narsil/amall-7b".to_string(),
             Which::V2 => "meta-llama/Llama-2-7b-hf".to_string(),
