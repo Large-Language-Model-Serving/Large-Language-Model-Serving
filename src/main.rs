@@ -1,211 +1,324 @@
-use anyhow::{Error, Result};
+mod model;
+
+use anyhow::Ok;
+use candle_core::cuda::cudarc::driver::result::stream;
+use candle_transformers::models::segment_anything::sam;
+use model::{TextGeneration, Model, Which};
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use serde::{de, Deserialize, Serialize};
+use std::default;
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Error as E, Result};
+use candle_transformers::models::gemma::{Config as ConfigGemma, Model as ModelGemma};
+use candle_transformers::models::gemma2::{Config as ConfigGemma2, Model as ModelGemma2};
+
+use candle_transformers::models::qwen2::{Config as ConfigQwen, ModelForCausalLM as ModelQwen};
+use candle_transformers::models::qwen2_moe::{Config as ConfigQwenMoe, Model as ModelQwenMoe};
+
+
 use candle_core::{DType, Device, Tensor};
+use candle_examples::token_output_stream::TokenOutputStream;
 use candle_nn::VarBuilder;
-use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::llama as model;
-use hf_hub::api::sync::Api;
-use model::{Llama, LlamaConfig};
-use std::io::Write;
+use candle_transformers::generation::LogitsProcessor;
+use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use tokenizers::Tokenizer;
 
-mod token_output_stream;
+use async_stream::try_stream;
+use futures_core::Stream;
+use actix_web::web::Bytes;
+use std::result::Result::Ok as ResultOk;
+use futures::pin_mut;
+use std::pin::Pin;
+use actix_web::middleware::{Logger, NormalizePath};
+//use tokio_stream::StreamExt;
+use tokio::sync::mpsc;
+//use tokio::sync::mpsc::Receiver;
+use tokio_stream::wrappers::ReceiverStream;
+use futures_util::{stream::StreamExt, TryStreamExt};
 
-const EOS_TOKEN: &str = "</s>";
-// const DEFAULT_PROMPT: &str = "My favorite theorem is ";
 
-/// Loads the safetensors files for a model from the hub based on a json index file.
-pub fn hub_load_safetensors(
-    repo: &hf_hub::api::sync::ApiRepo,
-    json_file: &str,
-) -> candle_core::Result<Vec<std::path::PathBuf>> {
-    let json_file = repo.get(json_file).map_err(candle_core::Error::wrap)?;
-    let json_file = std::fs::File::open(json_file)?;
-    let json: serde_json::Value =
-        serde_json::from_reader(&json_file).map_err(candle_core::Error::wrap)?;
-    let weight_map = match json.get("weight_map") {
-        None => candle_core::bail!("no weight map in {json_file:?}"),
-        Some(serde_json::Value::Object(map)) => map,
-        Some(_) => candle_core::bail!("weight map in {json_file:?} is not a map"),
-    };
-    let mut safetensors_files = std::collections::HashSet::new();
-    for value in weight_map.values() {
-        if let Some(file) = value.as_str() {
-            safetensors_files.insert(file.to_string());
-        }
-    }
-    let safetensors_files = safetensors_files
-        .iter()
-        .map(|v| repo.get(v).map_err(candle_core::Error::wrap))
-        .collect::<candle_core::Result<Vec<_>>>()?;
-    Ok(safetensors_files)
-}
-struct Args {
-    /// Run on CPU rather than on GPU.
-    // cpu: bool,
-
-    /// The temperature used to generate samples.
-    // temperature: f64,
-
-    /// Nucleus sampling probability cutoff.
-    // top_p: Option<f64>,
-
-    /// Only sample among the top K samples.
-    // top_k: Option<usize>,
-
-    /// The seed to use when generating random samples.
-    // seed: u64,
-
-    /// The length of the sample to generate (in tokens).
-    // sample_len: usize,
-
-    /// Disable the key-value cache.
-    // no_kv_cache: bool,
-
-    /// The initial prompt.
-    // prompt: Option<String>,
-
-    /// Use different dtype than f16
-    // dtype: Option<String>,
-
-    /// Enable tracing (generates a trace-timestamp.json file).
-    // tracing: bool,
-
-    // model_id: Option<String>,
-
-    // revision: Option<String>,
-
-    /// The model size to use.
-    // which: Which,
-
-    // use_flash_attn: bool,
-
-    /// Penalty to be applied for repeating tokens, 1. means no penalty.
+#[derive(Serialize, Deserialize, Default)]
+struct GenerateRequest {
+    prompt: String,
+    sample_len: usize,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
     repeat_penalty: f32,
-
-    /// The context size to consider for the repeat penalty.
     repeat_last_n: usize,
+    model: Which,
+    revision: String,
+    use_flash_attn: bool,
+    seed: u64,
+} 
+
+impl GenerateRequest{
+    fn default() -> Self {
+        Self {
+            prompt: "Hi, please introduce yourself.".to_string(),
+            sample_len: 10000,
+            temperature: None,
+            top_p: None,
+            repeat_penalty: 1.1,
+            repeat_last_n: 64,
+            model: Which::Qwen0_5b,
+            revision: "main".to_string(),
+            use_flash_attn: false,
+            seed: 111222333,
+        }
+    }   
 }
 
-fn main() -> Result<()> {
-    let args = Args {
-        repeat_penalty: 1.1,
-        repeat_last_n: 128,
+#[derive(Serialize, Deserialize)]
+struct GenerateResponse {
+    output: String,
+}
+
+struct AppState {
+    //generator: Arc<Mutex<TextGeneration>>,
+    device: Device,
+}
+
+fn set_model(data: web::Data<AppState>, req: web::Json<GenerateRequest>) -> Result<TextGeneration, anyhow::Error>{
+    let access_token = "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";   // Hugging Face Access Token
+    let api_builder = ApiBuilder::new();
+    let api_builder_token =  api_builder.with_token(Some(String::from(access_token)));
+    let api = api_builder_token.build()?;
+    let model_id = match req.model {
+            Which::GemmaInstructV1_1_2B => "google/gemma-1.1-2b-it".to_string(),
+            Which::GemmaInstructV1_1_7B => "google/gemma-1.1-7b-it".to_string(),
+            Which::Gemma2B => "google/gemma-2b".to_string(),
+            Which::Gemma7B => "google/gemma-7b".to_string(),
+            Which::GemmaInstruct2B => "google/gemma-2b-it".to_string(),
+            Which::GemmaInstruct7B => "google/gemma-7b-it".to_string(),
+            Which::GemmaCode2B => "google/codegemma-2b".to_string(),
+            Which::GemmaCode7B => "google/codegemma-7b".to_string(),
+            Which::GemmaCodeInstruct2B => "google/codegemma-2b-it".to_string(),
+            Which::GemmaCodeInstruct7B => "google/codegemma-7b-it".to_string(),
+            Which::Gemma2_2B => "google/gemma-2-2b".to_string(),
+            Which::Gemma2Instruct2B => "google/gemma-2-2b-it".to_string(),
+            Which::Gemma2_9B => "google/gemma-2-9b".to_string(),
+            Which::Gemma2Instruct9B => "google/gemma-2-9b-it".to_string(),
+            Which::Qwen2_0_5b => "Qwen/Qwen2-0.5B".to_string(),
+            Which::Qwen2_1_5b => "Qwen/Qwen2-1.5B".to_string(),
+            Which::Qwen2_7b => "Qwen/Qwen2-7B".to_string(),
+            Which::Qwen2_72b => "Qwen/Qwen2-72B".to_string(),
+            Which::Qwen0_5b => "Qwen/Qwen1.5-0.5B".to_string(),
+            Which::Qwen1_8b => "Qwen/Qwen1.5-1.8B".to_string(),
+            Which::Qwen4b => "Qwen/Qwen1.5-4B".to_string(),
+            Which::Qwen7b => "Qwen/Qwen1.5-7B".to_string(),
+            Which::Qwen14b => "Qwen/Qwen1.5-14B".to_string(),
+            Which::Qwen72b => "Qwen/Qwen1.5-72B".to_string(),
+            Which::QwenMoeA27b => "Qwen/Qwen1.5-MoE-A2.7B".to_string(),       
+    };
+    let repo = api.repo(Repo::with_revision(
+        model_id,
+        RepoType::Model,
+        req.revision.clone(),
+    ));
+    let tokenizer_filename =  repo.get("tokenizer.json")?;
+    
+    let config_filename = repo.get("config.json")?;
+    let filenames =  match req.model {
+            Which::Qwen0_5b | Which::Qwen2_0_5b | Which::Qwen2_1_5b | Which::Qwen1_8b => {
+                vec![repo.get("model.safetensors")?]
+            }
+            _ => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,  
+    };
+    //println!("retrieved the files in {:?}", start.elapsed());
+    let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
+
+    //let start = std::time::Instant::now();
+    //let device = candle_core::Device::new_cuda(0)?;
+    // let device = candle_core::Device::new_metal(0)?;     // On Mac
+    let dtype = if data.device.is_cuda() {
+        DType::F16  // BF16
+    } else {
+        DType::F32
+    };
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &data.device)? };
+    let model = if req.model.is_gemma() {
+        let config: ConfigGemma = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
+        //let model = ModelGemma::new(req.use_flash_attn, &config, vb)?;
+        let model = ModelGemma::new(false, &config, vb)?;
+        Model::Gemma(model)
+    } else if req.model.is_gemma2() {
+        let config: ConfigGemma2 = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
+        //let model = ModelGemma2::new(req.use_flash_attn, &config, vb)?;
+        let model = ModelGemma2::new(false, &config, vb)?;
+        Model::Gemma2(model)
+    } else if req.model.is_qwen() {
+        let config: ConfigQwen = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
+        let model = ModelQwen::new(&config, vb)?;
+        Model::Qwen(model)
+    } else if req.model.is_qwen_moe() {
+        let config: ConfigQwenMoe = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
+        let model = ModelQwenMoe::new(&config, vb)?;
+        Model::QwenMoe(model)
+    } else {
+        unreachable!()
     };
 
-    // Specify the device (CPU or GPU if available)
-    let device = Device::Cpu;
+   // println!("loaded the model in {:?}", start.elapsed());
 
-    // Load the tokenizer
-    let api = Api::new()?;
-    // let api = HfHub::new("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");
-    let repo = api.model("meta-llama/Llama-3.2-3B-Instruct".to_string());
-    let config_filename = repo.get("config.json").unwrap();
-    let tokenizer_filename = repo.get("tokenizer.json").unwrap();
-    let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
-    let use_flash_attn = false;
-    let config = config.into_config(use_flash_attn);
-    let weights_filenames = hub_load_safetensors(&repo, "model.safetensors.index.json")?;
-    // let config: BertModel = serde_json::from_str(&std::fs::read(config_filename)?)?;
-    // let config: BertModel = serde_json::from_str(&config).expect("Failed to parse config string");
-    let dtype = DType::F16;
-    let mut cache = model::Cache::new(true, dtype, &config, &device)?;
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weights_filenames, dtype, &device)? };
-    println!("start loading");
-    let llama = Llama::load(vb, &config)?;
-    println!("finished loading");
-    let tokenizer = Tokenizer::from_file(tokenizer_filename).expect("Failed to load tokenizer");
-    // Load the model weights and configuration
-    // let config_path = "models/bert-base-uncased/config.json";
-    // // let weights_path = "models/bert-base-uncased/pytorch_model.bin";
-    // let weights_path = "models/bert-base-uncased/model.safetensors";
-
-    // let vb = VarBuilder::from_mmaped_safetensors(&[weights_filename], DTYPE, &device)?;
-    // println!("here");
-    // let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], DTYPE, &device) }?;
-    // let config = std::fs::read_to_string(config_path)?;
-    // let config: Config = serde_json::from_str(&config).expect("Failed to parse config string");
-    let eos_token_id = config.eos_token_id.or_else(|| {
-        tokenizer
-            .token_to_id(EOS_TOKEN)
-            .map(model::LlamaEosToks::Single)
-    });
-    let prompt = "My favorite theorem is ";
-    // let prompt = args.prompt.as_ref().map_or(DEFAULT_PROMPT, |p| p.as_str());
-    let mut tokens = tokenizer
-        .encode(prompt, true)
-        .map_err(Error::msg)?
-        .get_ids()
-        .to_vec();
-    let mut tokenizer = token_output_stream::TokenOutputStream::new(tokenizer);
-
-    println!("starting the inference loop");
-    print!("{prompt}");
-    let mut logits_processor = {
-        let temperature = 0.8;
-        let sampling = if temperature <= 0. {
-            Sampling::ArgMax
-        } else {
-            Sampling::All { temperature }
-        };
-        let seed: u64 = 299792458;
-        LogitsProcessor::from_sampling(seed, sampling)
-    };
-
-    let mut start_gen = std::time::Instant::now();
-    let mut index_pos = 0;
-    let mut token_generated = 0;
-    let sample_len: usize = 10000;
-    for index in 0..sample_len {
-        let (context_size, context_index) = if cache.use_kv_cache && index > 0 {
-            (1, index_pos)
-        } else {
-            (tokens.len(), 0)
-        };
-        if index == 1 {
-            start_gen = std::time::Instant::now()
-        }
-        let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-        let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
-        let logits = llama.forward(&input, context_index, &mut cache)?;
-        let logits = logits.squeeze(0)?;
-        let logits = if args.repeat_penalty == 1. {
-            logits
-        } else {
-            let start_at = tokens.len().saturating_sub(args.repeat_last_n);
-            candle_transformers::utils::apply_repeat_penalty(
-                &logits,
-                args.repeat_penalty,
-                &tokens[start_at..],
-            )?
-        };
-        index_pos += ctxt.len();
-
-        let next_token = logits_processor.sample(&logits)?;
-        token_generated += 1;
-        tokens.push(next_token);
-
-        match eos_token_id {
-            Some(model::LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => {
-                break;
-            }
-            Some(model::LlamaEosToks::Multiple(ref eos_ids)) if eos_ids.contains(&next_token) => {
-                break;
-            }
-            _ => (),
-        }
-        if let Some(t) = tokenizer.next_token(next_token)? {
-            print!("{t}");
-            std::io::stdout().flush()?;
-        }
-    }
-    if let Some(rest) = tokenizer.decode_rest().map_err(Error::msg)? {
-        print!("{rest}");
-    }
-    let dt = start_gen.elapsed();
-    println!(
-        "\n\n{} tokens generated ({} token/s)\n",
-        token_generated,
-        (token_generated - 1) as f64 / dt.as_secs_f64(),
+    let mut pipeline = TextGeneration::new(
+        model,
+        tokenizer,
+        req.seed,
+        req.temperature,
+        req.top_p,
+        req.repeat_penalty,
+        req.repeat_last_n,
+        &data.device,
     );
-    Ok(())
+
+    Ok(pipeline)
+}
+
+#[get("/")]
+async fn hello() -> impl Responder {
+    HttpResponse::Ok().body("Hello world!")
+}
+
+// #[post("/switch_model")]
+// async fn switch_model(
+//     data: web::Data<AppState>,
+//     req: web::Json<GenerateRequest>,
+// ) -> impl Responder {
+//     let state = data.clone();
+//     let mut generator = state.generator.lock().unwrap();
+//     *generator = set_model(data, req).unwrap();
+//     //let mut generator = data.generator.lock().unwrap();
+//     //generator.model = req.model.unwrap();
+
+    
+//     HttpResponse::Ok().body("Model switched successfully!")
+// }   
+
+#[post("/generate")]
+async fn generate(
+    data: web::Data<AppState>,
+    req: web::Json<GenerateRequest>,
+) -> impl Responder {
+    //let mut generator = data.generator.lock().unwrap();
+    //let result = generator.run(&req.prompt, req.sample_len);
+    let prompt = req.prompt.clone();
+    let sample_len = req.sample_len.clone();
+    let mut generator = match set_model(data, req) {
+        ResultOk(gen) => gen,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    };
+    let receiver = match generator.run(&prompt, sample_len) {
+        ResultOk(recv) => recv,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    };
+    // let stream: Pin<Box<dyn Stream<Item = Result<Bytes, anyhow::Error>>>> = Box::pin(try_stream! {
+    //     for token in receiver {
+    //         yield Bytes::from(token); // Directly yield Bytes
+    //     }
+    // });
+    // HttpResponse::Ok().streaming(stream)
+
+    // for token in receiver {
+    //     println!("{}", token); // Process each token as it arrives
+    // }
+    // match result {
+    //     Ok(output) => HttpResponse::Ok().json(GenerateResponse { output }),
+    //     Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    // }
+    //pin_mut!(stream); // Pin the stream inline
+    
+
+    // Create a stream from the receiver
+    let stream = Box::pin(tokio_stream::iter(receiver).map(|token| {
+    // let stream = Box::pin(tokio_stream::Stream::poll_next(receiver, |token| {
+    //     // Convert each token into a Result<Bytes, anyhow::Error>
+        Result::<Bytes, anyhow::Error>::Ok(Bytes::from(token))
+    }));
+
+    // let stream = tokio_stream::wrappers::ReceiverStream::new(receiver)
+    // .map(|token| {
+    //     println!("Received token: {:?}", token);
+    //     Ok(Bytes::from(token)) }).boxed();
+
+    // Wrap the receiver into a stream
+    // let stream = ReceiverStream::new(receiver)
+    //     .map(|token| {
+    //         // Convert each token into a Result<Bytes, anyhow::Error>
+    //         Ok(Bytes::from(token))
+    //     });
+
+    // Convert the receiver into a stream
+   // let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+
+    // Return the streaming response
+    HttpResponse::Ok()
+        .content_type("application/octet-stream") // Adjust content type as needed
+        //.content_type("text/plain")  // Adjust content type if it's plain text
+        .streaming(stream)
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    // let args = Args::parse();
+    //let model = /* Load model logic here */;
+    //let tokenizer = /* Load tokenizer logic here */;
+    println!("loading the model");
+    let device = candle_core::Device::new_cuda(0).unwrap();
+    println!("setted the device");
+    let default = GenerateRequest::default();
+    println!("setted the default");
+
+    let access_token = "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";   // Hugging Face Access Token
+    let api_builder = ApiBuilder::new();
+    let api_builder_token =  api_builder.with_token(Some(String::from(access_token)));
+    let api = api_builder_token.build().unwrap();
+    let model_id = "Qwen/Qwen2-0.5B".to_string();
+    let repo = api.repo(Repo::with_revision(
+        model_id,
+        RepoType::Model,
+        default.revision.clone(),
+    ));
+    println!("loaded the repo");
+    let tokenizer_filename =  repo.get("tokenizer.json").unwrap();
+    println!("loaded the tokenizer");
+    
+    let config_filename = repo.get("config.json").unwrap();
+    println!("loaded the config");
+    let filenames =  vec![repo.get("model.safetensors").unwrap()];
+    println!("loaded the model");
+    let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg).unwrap();
+    println!("setted the tokenizer");
+
+    let dtype = if device.is_cuda() {
+        DType::F16  // BF16
+    } else {
+        DType::F32
+    };
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device).unwrap() };
+    let config: ConfigQwen = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
+    let model = Model::Qwen(ModelQwen::new(&config, vb).unwrap());
+    println!("setted the model");
+
+    let generator = TextGeneration::new(model, tokenizer, default.seed, default.temperature, default.top_p, default.repeat_penalty, default.repeat_last_n, &device);
+    println!("setted the generator");
+    let state = web::Data::new(AppState {
+       // generator: Arc::new(Mutex::new(generator)),
+        device,
+    });
+    println!("loaded the model");
+    //Logger::init(); // Initialize logger
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
+    HttpServer::new(move || {
+        App::new()
+            .wrap(Logger::default()) // Logs HTTP requests and responses
+            .wrap(NormalizePath::default()) // Normalize paths
+            .app_data(state.clone())
+            .service(hello)
+            .service(generate)
+    })
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await
 }
