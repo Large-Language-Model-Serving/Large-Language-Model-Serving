@@ -5,6 +5,7 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 use anyhow::{Error as E, Result};
+use candle_transformers::models::segment_anything::sam;
 use clap::Parser;
 
 use candle_transformers::models::gemma::{Config as ConfigGemma, Model as ModelGemma};
@@ -22,7 +23,15 @@ use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use tokenizers::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{self, Sender, Receiver};
+
+//use tokio::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
+
+use actix_web::{web, HttpResponse, Responder};
+use futures_util::{stream::StreamExt, TryStreamExt};  // Ensure StreamExt is imported
+use bytes::Bytes;
+use std::pin::Pin;
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, Default)]
 pub enum Which {
@@ -201,9 +210,11 @@ impl TextGeneration {
     }
 
     pub fn run(&mut self, prompt: &str, sample_len: usize) -> Result<Receiver<String>> {
+    //pub fn run(&mut self, prompt: &str, sample_len: usize) -> Result<ReceiverStream<Result<Bytes, anyhow::Error>>> {
         use std::io::Write;
 
-        let (sender, receiver): (Sender<String>, Receiver<String>) = mpsc::channel();
+        let (sender, receiver): (Sender<String>, Receiver<String>) = mpsc::channel(); 
+        //let (sender, receiver): (mpsc::SyncSender<String>, Receiver<String>) = mpsc::sync_channel(0);
         let tokenizer = Arc::clone(&self.tokenizer); 
         
         let device = self.device.clone();
@@ -243,8 +254,9 @@ impl TextGeneration {
          
         let start_gen = std::time::Instant::now();
         std::thread::spawn(move || {
-            let mut tokenizer = tokenizer.lock().unwrap();
-            let mut logits_processor = logits_processor.lock().unwrap();
+        //tokio::spawn(async move {
+         //   let mut tokenizer = tokenizer.lock().unwrap();
+          //  let mut logits_processor = logits_processor.lock().unwrap();
             for index in 0..sample_len {
                 let context_size = if index > 0 { 1 } else { tokens.len() };
                 let start_pos = tokens.len().saturating_sub(context_size);
@@ -275,16 +287,27 @@ impl TextGeneration {
                     ).unwrap()
                 };
 
-                let next_token = logits_processor.sample(&logits).unwrap();
+                let next_token = {
+                    let mut logits_processor = logits_processor.lock().unwrap();
+                    logits_processor.sample(&logits).unwrap()
+                };
+               // let next_token = logits_processor.sample(&logits).unwrap();
                 tokens.push(next_token);
                 generated_tokens += 1;
                 if next_token == eos_token {
                     break;
                 }
-                if let Ok(Some(t)) = tokenizer.next_token(next_token) {
+
+                let token_string = {
+                    let mut tokenizer = tokenizer.lock().unwrap();
+                    tokenizer.next_token(next_token)
+                };
+                if let Ok(Some(t)) = token_string {
+                //if let Ok(Some(t)) = tokenizer.next_token(next_token) {
                     //print!("{t}");
                     //std::io::stdout().flush()?;
-                    if let Err(_) = sender.send(t){
+                    println!("{t}");
+                    if let Err(_) = sender.send(t) {
                         eprintln!("Failed to send token"); // Log the error if sending fails
                     } // Send token text to the receiver
                 } else {
@@ -293,6 +316,19 @@ impl TextGeneration {
             }
 
         });
+
+        // Return the receiver wrapped in a stream
+        // let stream = tokio_stream::wrappers::ReceiverStream::new(receiver)
+        //     .map(|token| Ok(Bytes::from(token)))
+        //     .boxed(); // Box the stream so it can be used in Actix
+
+        // Convert receiver into a ReceiverStream and return it
+        // let stream = ReceiverStream::new(receiver)
+        //     .map(|token| Ok(Bytes::from(token))) // Convert token to Bytes and wrap in Ok
+        //     .map_err(|e| anyhow::Error::new(e)); // Convert any errors into `anyhow::Error`
+
+
+        // Ok(stream)
 
         Ok(receiver)
         // let dt = start_gen.elapsed();
