@@ -323,6 +323,7 @@ dependencies = [
  "clap",
  "hf-hub",
  "msvc_spectre_libs",
+ "serde",
  "serde_json",
  "tokenizers",
  "tokio",

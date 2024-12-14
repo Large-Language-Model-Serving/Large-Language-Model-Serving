@@ -20,9 +20,12 @@ use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use tokenizers::Tokenizer;
+use serde::{Deserialize, Serialize};
+use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Which {
+#[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, Default)]
+pub enum Which {
     // Gemma
     #[value(name = "gemma-2b")]
     Gemma2B,
@@ -54,6 +57,7 @@ enum Which {
     Gemma2Instruct9B,
 
     // Qwen
+    #[default]
     #[value(name = "Qwen0.5b")]
     Qwen0_5b,
     #[value(name = "Qwen1.8b")]
@@ -79,7 +83,7 @@ enum Which {
 }
 
 impl Which {
-    fn is_gemma(&self) -> bool {
+    pub fn is_gemma(&self) -> bool {
         match self {
             Self::Gemma2B
             | Self::Gemma7B
@@ -94,14 +98,14 @@ impl Which {
             _ => false,
         }
     }
-    fn is_gemma2(&self) -> bool {
+    pub fn is_gemma2(&self) -> bool {
         match self {
             Self::Gemma2_2B | Self::Gemma2Instruct2B | Self::Gemma2_9B | Self::Gemma2Instruct9B => true,
             _ => false,
         }
     }
 
-    fn is_qwen(&self) -> bool {
+    pub fn is_qwen(&self) -> bool {
         match self {
             Self::Qwen0_5b
             | Self::Qwen1_8b
@@ -118,7 +122,7 @@ impl Which {
         }
     }
 
-    fn is_qwen_moe(&self) -> bool {
+    pub fn is_qwen_moe(&self) -> bool {
         match self {
             Self::QwenMoeA27b => true,
             _ => false,
@@ -126,7 +130,8 @@ impl Which {
     }
 }
 
-enum Model {
+#[derive(Clone)]
+pub enum Model {
     Gemma(ModelGemma),
     Gemma2(ModelGemma2),
     Qwen(ModelQwen),
@@ -134,7 +139,7 @@ enum Model {
 }
 
 impl Model {
-    fn forward(&mut self, input_ids: &Tensor, pos: usize) -> candle_core::Result<Tensor> {
+    pub fn forward(&mut self, input_ids: &Tensor, pos: usize) -> candle_core::Result<Tensor> {
         match self {
             Self::Gemma(m) => m.forward(input_ids, pos),
             Self::Gemma2(m) => m.forward(input_ids, pos),
@@ -143,7 +148,7 @@ impl Model {
         }
     }
 
-    fn is_gemma(&self) -> bool {
+    pub fn is_gemma(&self) -> bool {
         match self {
             Self::Gemma(_) => true,
             Self::Gemma2(_) => true,
@@ -151,7 +156,7 @@ impl Model {
         }
     }
 
-    fn is_qwen(&self) -> bool {
+    pub fn is_qwen(&self) -> bool {
         match self {
             Self::Qwen(_) => true,
             Self::QwenMoe(_) => true,
@@ -160,18 +165,19 @@ impl Model {
     }
 }
 
-struct TextGeneration {
+pub struct TextGeneration {
     model: Model,
     device: Device,
-    tokenizer: TokenOutputStream,
-    logits_processor: LogitsProcessor,
+    tokenizer: Arc<Mutex<TokenOutputStream>>,
+    tokenizer2: TokenOutputStream,
+    logits_processor: Arc<Mutex<LogitsProcessor>>,
     repeat_penalty: f32,
     repeat_last_n: usize,
 }
 
 impl TextGeneration {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub fn new(
         model: Model,
         tokenizer: Tokenizer,
         seed: u64,
@@ -181,10 +187,12 @@ impl TextGeneration {
         repeat_last_n: usize,
         device: &Device,
     ) -> Self {
-        let logits_processor = LogitsProcessor::new(seed, temp, top_p);
+        //let logits_processor = LogitsProcessor::new(seed, temp, top_p);
+        let logits_processor = Arc::new(Mutex::new(LogitsProcessor::new(seed, temp, top_p)));
         Self {
             model,
-            tokenizer: TokenOutputStream::new(tokenizer),
+            tokenizer: Arc::new(Mutex::new(TokenOutputStream::new(tokenizer.clone()))),
+            tokenizer2: TokenOutputStream::new(tokenizer),
             logits_processor,
             repeat_penalty,
             repeat_last_n,
@@ -192,18 +200,27 @@ impl TextGeneration {
         }
     }
 
-    fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
+    pub fn run(&mut self, prompt: &str, sample_len: usize) -> Result<Receiver<String>> {
         use std::io::Write;
-        self.tokenizer.clear();
-        let mut tokens = self
-            .tokenizer
+
+        let (sender, receiver): (Sender<String>, Receiver<String>) = mpsc::channel();
+        let tokenizer = Arc::clone(&self.tokenizer); 
+        
+        let device = self.device.clone();
+        let mut model = self.model.clone();
+        let logits_processor = Arc::clone(&self.logits_processor);
+        let repeat_penalty = self.repeat_penalty;
+        let repeat_last_n = self.repeat_last_n;
+
+        self.tokenizer2.clear();
+        let mut tokens = self.tokenizer2
             .tokenizer()
             .encode(prompt, true)
             .map_err(E::msg)?
             .get_ids()
             .to_vec();
         for &t in tokens.iter() {
-            if let Some(t) = self.tokenizer.next_token(t)? {
+            if let Some(t) = self.tokenizer2.next_token(t)? {
                 print!("{t}")
             }
         }
@@ -211,12 +228,12 @@ impl TextGeneration {
 
         let mut generated_tokens = 0usize;
         let eos_token: u32 = if self.model.is_qwen() {
-            match self.tokenizer.get_token("<|endoftext|>") {
+            match self.tokenizer2.get_token("<|endoftext|>") {
                 Some(token) => token,
                 None => anyhow::bail!("cannot find the <|endoftext|> token"),
             }
         } else if self.model.is_gemma() {
-            match self.tokenizer.get_token("<eos>") {
+            match self.tokenizer2.get_token("<eos>") {
                 Some(token) => token,
                 None => anyhow::bail!("cannot find the <eos> token"),
             }
@@ -225,45 +242,69 @@ impl TextGeneration {
         };
          
         let start_gen = std::time::Instant::now();
-        for index in 0..sample_len {
-            let context_size = if index > 0 { 1 } else { tokens.len() };
-            let start_pos = tokens.len().saturating_sub(context_size);
-            let ctxt = &tokens[start_pos..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
-            let logits = self.model.forward(&input, start_pos)?;
-            let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
-            let logits = if self.repeat_penalty == 1. {
-                logits
-            } else {
-                let start_at = tokens.len().saturating_sub(self.repeat_last_n);
-                candle_transformers::utils::apply_repeat_penalty(
-                    &logits,
-                    self.repeat_penalty,
-                    &tokens[start_at..],
-                )?
-            };
+        std::thread::spawn(move || {
+            let mut tokenizer = tokenizer.lock().unwrap();
+            let mut logits_processor = logits_processor.lock().unwrap();
+            for index in 0..sample_len {
+                let context_size = if index > 0 { 1 } else { tokens.len() };
+                let start_pos = tokens.len().saturating_sub(context_size);
+                let ctxt = &tokens[start_pos..];
+                let input = match Tensor::new(ctxt, &device).and_then(|t| t.unsqueeze(0)) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        println!("Error: {}", e);
+                        break;
+                    }
+                };
+                let logits = model.forward(&input, start_pos).unwrap();
+                let logits = match logits.squeeze(0).and_then(|l| l.squeeze(0)).and_then(|l| l.to_dtype(DType::F32)) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        println!("Error: {}", e);
+                        break;
+                    }
+                };
+                let logits = if repeat_penalty == 1. {
+                    logits
+                } else {
+                    let start_at = tokens.len().saturating_sub(repeat_last_n);
+                    candle_transformers::utils::apply_repeat_penalty(
+                        &logits,
+                        repeat_penalty,
+                        &tokens[start_at..],
+                    ).unwrap()
+                };
 
-            let next_token = self.logits_processor.sample(&logits)?;
-            tokens.push(next_token);
-            generated_tokens += 1;
-            if next_token == eos_token {
-                break;
+                let next_token = logits_processor.sample(&logits).unwrap();
+                tokens.push(next_token);
+                generated_tokens += 1;
+                if next_token == eos_token {
+                    break;
+                }
+                if let Ok(Some(t)) = tokenizer.next_token(next_token) {
+                    //print!("{t}");
+                    //std::io::stdout().flush()?;
+                    if let Err(_) = sender.send(t){
+                        eprintln!("Failed to send token"); // Log the error if sending fails
+                    } // Send token text to the receiver
+                } else {
+                    eprintln!("Failed to get token");
+                }
             }
-            if let Some(t) = self.tokenizer.next_token(next_token)? {
-                print!("{t}");
-                std::io::stdout().flush()?;
-            }
-        }
-        let dt = start_gen.elapsed();
-        if let Some(rest) = self.tokenizer.decode_rest().map_err(E::msg)? {
-            print!("{rest}");
-        }
-        std::io::stdout().flush()?;
-        println!(
-            "\n{generated_tokens} tokens generated ({:.2} token/s)",
-            generated_tokens as f64 / dt.as_secs_f64(),
-        );
-        Ok(())
+
+        });
+
+        Ok(receiver)
+        // let dt = start_gen.elapsed();
+        // if let Some(rest) = self.tokenizer.decode_rest().map_err(E::msg)? {
+        //     print!("{rest}");
+        // }
+        // std::io::stdout().flush()?;
+        // println!(
+        //     "\n{generated_tokens} tokens generated ({:.2} token/s)",
+        //     generated_tokens as f64 / dt.as_secs_f64(),
+        // );
+        // Ok(())
     }
 }
 

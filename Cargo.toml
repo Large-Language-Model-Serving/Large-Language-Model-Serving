@@ -12,6 +12,7 @@ candle-nn = { git = "https://github.com/huggingface/candle.git", features = ["cu
 candle-core = { git = "https://github.com/huggingface/candle.git", features = ["cuda"] }
 candle-transformers = { git = "https://github.com/huggingface/candle.git", features = ["cuda"]  }
 tokenizers = "0.19.1"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.132"
 tokio = "1.41.0"
 anyhow = "1.0.91"
