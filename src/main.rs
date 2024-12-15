@@ -1,41 +1,22 @@
 mod model;
 
 use anyhow::Ok;
-use candle_core::cuda::cudarc::driver::result::stream;
-use candle_transformers::models::segment_anything::sam;
 use model::{TextGeneration, Model, Which};
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-use serde::{de, Deserialize, Serialize};
-use std::default;
-use std::sync::{Arc, Mutex};
-
+use serde::{Deserialize, Serialize};
 use anyhow::{Error as E, Result};
 use candle_transformers::models::gemma::{Config as ConfigGemma, Model as ModelGemma};
 use candle_transformers::models::gemma2::{Config as ConfigGemma2, Model as ModelGemma2};
-
 use candle_transformers::models::qwen2::{Config as ConfigQwen, ModelForCausalLM as ModelQwen};
 use candle_transformers::models::qwen2_moe::{Config as ConfigQwenMoe, Model as ModelQwenMoe};
-
-
-use candle_core::{DType, Device, Tensor};
-use candle_examples::token_output_stream::TokenOutputStream;
+use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
-use candle_transformers::generation::LogitsProcessor;
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use tokenizers::Tokenizer;
-
-use async_stream::try_stream;
-use futures_core::Stream;
 use actix_web::web::Bytes;
 use std::result::Result::Ok as ResultOk;
-use futures::pin_mut;
-use std::pin::Pin;
-use actix_web::middleware::{Logger, NormalizePath};
-//use tokio_stream::StreamExt;
-use tokio::sync::mpsc;
-//use tokio::sync::mpsc::Receiver;
-use tokio_stream::wrappers::ReceiverStream;
-use futures_util::{stream::StreamExt, TryStreamExt};
+use actix_web::middleware::Logger;
+use futures_util::stream::StreamExt;
 
 
 #[derive(Serialize, Deserialize, Default)]
@@ -52,22 +33,6 @@ struct GenerateRequest {
     seed: u64,
 } 
 
-impl GenerateRequest{
-    fn default() -> Self {
-        Self {
-            prompt: "Hi, please introduce yourself.".to_string(),
-            sample_len: 10000,
-            temperature: None,
-            top_p: None,
-            repeat_penalty: 1.1,
-            repeat_last_n: 64,
-            model: Which::Qwen0_5b,
-            revision: "main".to_string(),
-            use_flash_attn: false,
-            seed: 111222333,
-        }
-    }   
-}
 
 #[derive(Serialize, Deserialize)]
 struct GenerateResponse {
@@ -75,7 +40,6 @@ struct GenerateResponse {
 }
 
 struct AppState {
-    //generator: Arc<Mutex<TextGeneration>>,
     device: Device,
 }
 
@@ -125,12 +89,9 @@ fn set_model(data: web::Data<AppState>, req: web::Json<GenerateRequest>) -> Resu
             }
             _ => candle_examples::hub_load_safetensors(&repo, "model.safetensors.index.json")?,  
     };
-    //println!("retrieved the files in {:?}", start.elapsed());
+ 
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
 
-    //let start = std::time::Instant::now();
-    //let device = candle_core::Device::new_cuda(0)?;
-    // let device = candle_core::Device::new_metal(0)?;     // On Mac
     let dtype = if data.device.is_cuda() {
         DType::F16  // BF16
     } else {
@@ -139,12 +100,10 @@ fn set_model(data: web::Data<AppState>, req: web::Json<GenerateRequest>) -> Resu
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &data.device)? };
     let model = if req.model.is_gemma() {
         let config: ConfigGemma = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
-        //let model = ModelGemma::new(req.use_flash_attn, &config, vb)?;
         let model = ModelGemma::new(false, &config, vb)?;
         Model::Gemma(model)
     } else if req.model.is_gemma2() {
         let config: ConfigGemma2 = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
-        //let model = ModelGemma2::new(req.use_flash_attn, &config, vb)?;
         let model = ModelGemma2::new(false, &config, vb)?;
         Model::Gemma2(model)
     } else if req.model.is_qwen() {
@@ -159,9 +118,7 @@ fn set_model(data: web::Data<AppState>, req: web::Json<GenerateRequest>) -> Resu
         unreachable!()
     };
 
-   // println!("loaded the model in {:?}", start.elapsed());
-
-    let mut pipeline = TextGeneration::new(
+    let pipeline = TextGeneration::new(
         model,
         tokenizer,
         req.seed,
@@ -180,28 +137,12 @@ async fn hello() -> impl Responder {
     HttpResponse::Ok().body("Hello world!")
 }
 
-// #[post("/switch_model")]
-// async fn switch_model(
-//     data: web::Data<AppState>,
-//     req: web::Json<GenerateRequest>,
-// ) -> impl Responder {
-//     let state = data.clone();
-//     let mut generator = state.generator.lock().unwrap();
-//     *generator = set_model(data, req).unwrap();
-//     //let mut generator = data.generator.lock().unwrap();
-//     //generator.model = req.model.unwrap();
-
-    
-//     HttpResponse::Ok().body("Model switched successfully!")
-// }   
 
 #[post("/generate")]
 async fn generate(
     data: web::Data<AppState>,
     req: web::Json<GenerateRequest>,
 ) -> impl Responder {
-    //let mut generator = data.generator.lock().unwrap();
-    //let result = generator.run(&req.prompt, req.sample_len);
     let prompt = req.prompt.clone();
     let sample_len = req.sample_len.clone();
     let mut generator = match set_model(data, req) {
@@ -212,108 +153,33 @@ async fn generate(
         ResultOk(recv) => recv,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {}", e)),
     };
-    // let stream: Pin<Box<dyn Stream<Item = Result<Bytes, anyhow::Error>>>> = Box::pin(try_stream! {
-    //     for token in receiver {
-    //         yield Bytes::from(token); // Directly yield Bytes
-    //     }
-    // });
-    // HttpResponse::Ok().streaming(stream)
-
-    // for token in receiver {
-    //     println!("{}", token); // Process each token as it arrives
-    // }
-    // match result {
-    //     Ok(output) => HttpResponse::Ok().json(GenerateResponse { output }),
-    //     Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
-    // }
-    //pin_mut!(stream); // Pin the stream inline
     
 
     // Create a stream from the receiver
     let stream = Box::pin(tokio_stream::iter(receiver).map(|token| {
-    // let stream = Box::pin(tokio_stream::Stream::poll_next(receiver, |token| {
-    //     // Convert each token into a Result<Bytes, anyhow::Error>
+    // Convert each token into a Result<Bytes, anyhow::Error>
         Result::<Bytes, anyhow::Error>::Ok(Bytes::from(token))
     }));
 
-    // let stream = tokio_stream::wrappers::ReceiverStream::new(receiver)
-    // .map(|token| {
-    //     println!("Received token: {:?}", token);
-    //     Ok(Bytes::from(token)) }).boxed();
-
-    // Wrap the receiver into a stream
-    // let stream = ReceiverStream::new(receiver)
-    //     .map(|token| {
-    //         // Convert each token into a Result<Bytes, anyhow::Error>
-    //         Ok(Bytes::from(token))
-    //     });
-
-    // Convert the receiver into a stream
-   // let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
-
     // Return the streaming response
     HttpResponse::Ok()
-        .content_type("application/octet-stream") // Adjust content type as needed
-        //.content_type("text/plain")  // Adjust content type if it's plain text
+        .content_type("text/plain") 
         .streaming(stream)
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // let args = Args::parse();
-    //let model = /* Load model logic here */;
-    //let tokenizer = /* Load tokenizer logic here */;
-    println!("loading the model");
     let device = candle_core::Device::new_cuda(0).unwrap();
-    println!("setted the device");
-    let default = GenerateRequest::default();
-    println!("setted the default");
 
-    let access_token = "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";   // Hugging Face Access Token
-    let api_builder = ApiBuilder::new();
-    let api_builder_token =  api_builder.with_token(Some(String::from(access_token)));
-    let api = api_builder_token.build().unwrap();
-    let model_id = "Qwen/Qwen2-0.5B".to_string();
-    let repo = api.repo(Repo::with_revision(
-        model_id,
-        RepoType::Model,
-        default.revision.clone(),
-    ));
-    println!("loaded the repo");
-    let tokenizer_filename =  repo.get("tokenizer.json").unwrap();
-    println!("loaded the tokenizer");
-    
-    let config_filename = repo.get("config.json").unwrap();
-    println!("loaded the config");
-    let filenames =  vec![repo.get("model.safetensors").unwrap()];
-    println!("loaded the model");
-    let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg).unwrap();
-    println!("setted the tokenizer");
-
-    let dtype = if device.is_cuda() {
-        DType::F16  // BF16
-    } else {
-        DType::F32
-    };
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device).unwrap() };
-    let config: ConfigQwen = serde_json::from_reader(std::fs::File::open(config_filename)?)?;
-    let model = Model::Qwen(ModelQwen::new(&config, vb).unwrap());
-    println!("setted the model");
-
-    let generator = TextGeneration::new(model, tokenizer, default.seed, default.temperature, default.top_p, default.repeat_penalty, default.repeat_last_n, &device);
-    println!("setted the generator");
     let state = web::Data::new(AppState {
-       // generator: Arc::new(Mutex::new(generator)),
         device,
     });
-    println!("loaded the model");
-    //Logger::init(); // Initialize logger
+
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default()) // Logs HTTP requests and responses
-            .wrap(NormalizePath::default()) // Normalize paths
             .app_data(state.clone())
             .service(hello)
             .service(generate)
