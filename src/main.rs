@@ -29,7 +29,6 @@ struct GenerateRequest {
     repeat_last_n: usize,
     model: Which,
     revision: String,
-    use_flash_attn: bool,
     seed: u64,
 } 
 
