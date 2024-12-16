@@ -1,0 +1,15 @@
+POST http://127.0.0.1:8080/generate
+Content-Type: application/json
+
+{
+    "prompt": "Hello, world!",
+    "sample_len": 100,
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "repeat_penalty": 1.2,
+    "repeat_last_n": 50,
+    "model": "Qwen0_5b",
+    "revision": "main",
+    "use_flash_attn": true,
+    "seed": 42
+}
