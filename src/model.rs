@@ -1,4 +1,5 @@
 use anyhow::{Error as E, Result};
+use actix_web::web;
 use candle_transformers::models::gemma::Model as ModelGemma;
 use candle_transformers::models::gemma2::Model as ModelGemma2;
 use candle_transformers::models::qwen2::ModelForCausalLM as ModelQwen;
@@ -6,10 +7,11 @@ use candle_transformers::models::qwen2_moe::Model as ModelQwenMoe;
 use candle_core::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
-use tokenizers::Tokenizer;
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
+use sqlx::SqlitePool;
+use tokenizers::Tokenizer;
+use tokio::sync::mpsc::{self, Sender, Receiver};
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, Default)]
 pub enum Which {
@@ -186,11 +188,15 @@ impl TextGeneration {
         }
     }
 
-    pub fn run(&mut self, prompt: &str, sample_len: usize) -> Result<Receiver<String>> {
+    pub fn run(&mut self, prompt: &str, sample_len: usize, pool: web::Data<SqlitePool>, conversation_id: String) -> Result<Receiver<String>> {
         use std::io::Write;
 
-        let (sender, receiver): (Sender<String>, Receiver<String>) = mpsc::channel();
+        let (sender, receiver): (Sender<String>, Receiver<String>) = mpsc::channel(1);
+        
         let tokenizer = Arc::clone(&self.tokenizer); 
+        let pool = pool.clone();
+        let conversation_id = conversation_id.clone();
+        let sample_len = sample_len.clone();
         
         let device = self.device.clone();
         let mut model = self.model.clone();
@@ -199,7 +205,7 @@ impl TextGeneration {
         let repeat_last_n = self.repeat_last_n;
 
         self.tokenizer2.clear();
-        let mut tokens = self.tokenizer2
+        let tokens = self.tokenizer2
             .tokenizer()
             .encode(prompt, true)
             .map_err(E::msg)?
@@ -211,6 +217,8 @@ impl TextGeneration {
             }
         }
         std::io::stdout().flush()?;
+
+        let tokens = Arc::new(Mutex::new(tokens));
 
         let eos_token: u32 = if self.model.is_qwen() {
             match self.tokenizer2.get_token("<|endoftext|>") {
@@ -226,59 +234,78 @@ impl TextGeneration {
             anyhow::bail!("cannot find the eos token");
         };
 
-        std::thread::spawn(move || {
-            for index in 0..sample_len {
-                let context_size = if index > 0 { 1 } else { tokens.len() };
-                let start_pos = tokens.len().saturating_sub(context_size);
-                let ctxt = &tokens[start_pos..];
-                let input = match Tensor::new(ctxt, &device).and_then(|t| t.unsqueeze(0)) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        println!("Error: {}", e);
+        actix_rt::spawn(async move {
+            if let Err(e) = async {
+
+                let mut response = String::new();
+                for index in 0..sample_len {
+                    let mut tokens = tokens.lock().unwrap();
+                    let context_size = if index > 0 { 1 } else { tokens.len() };
+                    let start_pos = tokens.len().saturating_sub(context_size);
+                    let ctxt = &tokens[start_pos..];
+                    let input = match Tensor::new(ctxt, &device).and_then(|t| t.unsqueeze(0)) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            println!("Error: {}", e);
+                            break;
+                        }
+                    };
+                    let logits = model.forward(&input, start_pos).unwrap();
+                    let logits = match logits.squeeze(0).and_then(|l| l.squeeze(0)).and_then(|l| l.to_dtype(DType::F32)) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            println!("Error: {}", e);
+                            break;
+                        }
+                    };
+                    let logits = if repeat_penalty == 1. {
+                        logits
+                    } else {
+                        let start_at = tokens.len().saturating_sub(repeat_last_n);
+                        candle_transformers::utils::apply_repeat_penalty(
+                            &logits,
+                            repeat_penalty,
+                            &tokens[start_at..],
+                        ).unwrap()
+                    };
+
+                    let next_token = {
+                        let mut logits_processor = logits_processor.lock().unwrap();
+                        logits_processor.sample(&logits).unwrap()
+                    };
+                
+                    tokens.push(next_token);
+                    if next_token == eos_token {
                         break;
                     }
-                };
-                let logits = model.forward(&input, start_pos).unwrap();
-                let logits = match logits.squeeze(0).and_then(|l| l.squeeze(0)).and_then(|l| l.to_dtype(DType::F32)) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        println!("Error: {}", e);
-                        break;
+
+                    let token_string = {
+                        let mut tokenizer = tokenizer.lock().unwrap();
+                        tokenizer.next_token(next_token)
+                    };
+                    if let Ok(Some(t)) = token_string {
+                        println!("{t}");
+                        response.push_str(&t);
+                        if let Err(_) = sender.send(t).await {
+                            eprintln!("Failed to send token"); // Log the error if sending fails
+                        } // Send token text to the receiver
+                    } else {
+                        eprintln!("Failed to get token");
                     }
-                };
-                let logits = if repeat_penalty == 1. {
-                    logits
-                } else {
-                    let start_at = tokens.len().saturating_sub(repeat_last_n);
-                    candle_transformers::utils::apply_repeat_penalty(
-                        &logits,
-                        repeat_penalty,
-                        &tokens[start_at..],
-                    ).unwrap()
-                };
-
-                let next_token = {
-                    let mut logits_processor = logits_processor.lock().unwrap();
-                    logits_processor.sample(&logits).unwrap()
-                };
-            
-                tokens.push(next_token);
-                if next_token == eos_token {
-                    break;
                 }
-
-                let token_string = {
-                    let mut tokenizer = tokenizer.lock().unwrap();
-                    tokenizer.next_token(next_token)
-                };
-                if let Ok(Some(t)) = token_string {
-                    println!("{t}");
-                    if let Err(_) = sender.send(t) {
-                        eprintln!("Failed to send token"); // Log the error if sending fails
-                    } // Send token text to the receiver
-                } else {
-                    eprintln!("Failed to get token");
-                }
+                sqlx::query(
+                    r#"
+                    INSERT INTO messages (conversation_id, sender, content) VALUES (?, ?, ?)
+                    "#,
+                )
+                .bind(&conversation_id)
+                .bind("Assistant")
+                .bind(&response)
+                .execute(pool.get_ref()).await.expect("Failed to insert message into database");
+                
+                Ok::<(), Box<dyn std::error::Error>>(())
+            }.await {
+                eprintln!("Error in spawned task: {:?}", e);
             }
 
         });
