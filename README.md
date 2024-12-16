@@ -1,6 +1,6 @@
 # Final Report
 
-* Qi Zhang 1010190106
+* Qi Zhang 1010190106  qqi.zhang@mail.utoronto.ca
 * Shidi Zhao 1003648378
 
 ## Motivation
