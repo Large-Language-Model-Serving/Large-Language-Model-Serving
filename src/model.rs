@@ -1,4 +1,5 @@
 use anyhow::{Error as E, Result};
+use actix_web::web;
 use candle_transformers::models::gemma::Model as ModelGemma;
 use candle_transformers::models::gemma2::Model as ModelGemma2;
 use candle_transformers::models::qwen2::ModelForCausalLM as ModelQwen;
@@ -6,12 +7,10 @@ use candle_transformers::models::qwen2_moe::Model as ModelQwenMoe;
 use candle_core::{DType, Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
-use tokenizers::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-
 use sqlx::SqlitePool;
-use actix_web::web;
+use tokenizers::Tokenizer;
 use tokio::sync::mpsc::{self, Sender, Receiver};
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, Default)]

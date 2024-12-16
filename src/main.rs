@@ -1,31 +1,32 @@
 mod model;
 mod db;
 
-use anyhow::Ok;
-//use clap::builder::Str;
-use model::{TextGeneration, Model, Which};
+use actix_cors::Cors;
 use actix_web::{delete, get, post, web, App, HttpResponse, HttpServer, Responder};
-use serde::{Deserialize, Serialize};
+use actix_web::web::Bytes;
+use actix_web::middleware::Logger;
+use anyhow::Ok;
 use anyhow::{Error as E, Result};
+
 use candle_transformers::models::gemma::{Config as ConfigGemma, Model as ModelGemma};
 use candle_transformers::models::gemma2::{Config as ConfigGemma2, Model as ModelGemma2};
 use candle_transformers::models::qwen2::{Config as ConfigQwen, ModelForCausalLM as ModelQwen};
 use candle_transformers::models::qwen2_moe::{Config as ConfigQwenMoe, Model as ModelQwenMoe};
 use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
-use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
-use tokenizers::Tokenizer;
-use actix_web::web::Bytes;
-use std::result::Result::Ok as ResultOk;
-use actix_web::middleware::Logger;
 use futures_util::stream::StreamExt;
-
-use sqlx::SqlitePool;
-//use sqlx::Error;
-use uuid::Uuid;
-use std::fmt::Write;
+use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+use model::{TextGeneration, Model, Which};
+use tokenizers::Tokenizer;
 use tokio_stream::wrappers::ReceiverStream;
-use actix_cors::Cors;
+use uuid::Uuid;
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::fmt::Write;
+use std::result::Result::Ok as ResultOk;
+
+
+
 
 
 #[derive(Serialize, Deserialize, Default)]
@@ -54,56 +55,51 @@ struct Conversation {
     created_at: String,
 }
 
-
-
-// #[derive(Deserialize)]
-// struct NewMessage {
-//     sender: String,
-//     content: String,
-// }
-
 struct AppState {
     device: Device,
 }
 
-fn set_model(data: web::Data<AppState>, req: web::Json<GenerateRequest>) -> Result<TextGeneration, anyhow::Error>{
+fn set_model(
+    data: web::Data<AppState>, 
+    req: web::Json<GenerateRequest>
+) -> Result<TextGeneration, anyhow::Error>{
     let access_token = "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";   // Hugging Face Access Token
     let api_builder = ApiBuilder::new();
-    let api_builder_token =  api_builder.with_token(Some(String::from(access_token)));
+    let api_builder_token = api_builder.with_token(Some(String::from(access_token)));
     let api = api_builder_token.build()?;
     let model_id = match req.model {
-            Which::GemmaInstructV1_1_2B => "google/gemma-1.1-2b-it".to_string(),
-            Which::GemmaInstructV1_1_7B => "google/gemma-1.1-7b-it".to_string(),
-            Which::Gemma2B => "google/gemma-2b".to_string(),
-            Which::Gemma7B => "google/gemma-7b".to_string(),
-            Which::GemmaInstruct2B => "google/gemma-2b-it".to_string(),
-            Which::GemmaInstruct7B => "google/gemma-7b-it".to_string(),
-            Which::GemmaCode2B => "google/codegemma-2b".to_string(),
-            Which::GemmaCode7B => "google/codegemma-7b".to_string(),
-            Which::GemmaCodeInstruct2B => "google/codegemma-2b-it".to_string(),
-            Which::GemmaCodeInstruct7B => "google/codegemma-7b-it".to_string(),
-            Which::Gemma2_2B => "google/gemma-2-2b".to_string(),
-            Which::Gemma2Instruct2B => "google/gemma-2-2b-it".to_string(),
-            Which::Gemma2_9B => "google/gemma-2-9b".to_string(),
-            Which::Gemma2Instruct9B => "google/gemma-2-9b-it".to_string(),
-            Which::Qwen2_0_5b => "Qwen/Qwen2-0.5B".to_string(),
-            Which::Qwen2_1_5b => "Qwen/Qwen2-1.5B".to_string(),
-            Which::Qwen2_7b => "Qwen/Qwen2-7B".to_string(),
-            Which::Qwen2_72b => "Qwen/Qwen2-72B".to_string(),
-            Which::Qwen0_5b => "Qwen/Qwen1.5-0.5B".to_string(),
-            Which::Qwen1_8b => "Qwen/Qwen1.5-1.8B".to_string(),
-            Which::Qwen4b => "Qwen/Qwen1.5-4B".to_string(),
-            Which::Qwen7b => "Qwen/Qwen1.5-7B".to_string(),
-            Which::Qwen14b => "Qwen/Qwen1.5-14B".to_string(),
-            Which::Qwen72b => "Qwen/Qwen1.5-72B".to_string(),
-            Which::QwenMoeA27b => "Qwen/Qwen1.5-MoE-A2.7B".to_string(),       
+        Which::GemmaInstructV1_1_2B => "google/gemma-1.1-2b-it".to_string(),
+        Which::GemmaInstructV1_1_7B => "google/gemma-1.1-7b-it".to_string(),
+        Which::Gemma2B => "google/gemma-2b".to_string(),
+        Which::Gemma7B => "google/gemma-7b".to_string(),
+        Which::GemmaInstruct2B => "google/gemma-2b-it".to_string(),
+        Which::GemmaInstruct7B => "google/gemma-7b-it".to_string(),
+        Which::GemmaCode2B => "google/codegemma-2b".to_string(),
+        Which::GemmaCode7B => "google/codegemma-7b".to_string(),
+        Which::GemmaCodeInstruct2B => "google/codegemma-2b-it".to_string(),
+        Which::GemmaCodeInstruct7B => "google/codegemma-7b-it".to_string(),
+        Which::Gemma2_2B => "google/gemma-2-2b".to_string(),
+        Which::Gemma2Instruct2B => "google/gemma-2-2b-it".to_string(),
+        Which::Gemma2_9B => "google/gemma-2-9b".to_string(),
+        Which::Gemma2Instruct9B => "google/gemma-2-9b-it".to_string(),
+        Which::Qwen2_0_5b => "Qwen/Qwen2-0.5B".to_string(),
+        Which::Qwen2_1_5b => "Qwen/Qwen2-1.5B".to_string(),
+        Which::Qwen2_7b => "Qwen/Qwen2-7B".to_string(),
+        Which::Qwen2_72b => "Qwen/Qwen2-72B".to_string(),
+        Which::Qwen0_5b => "Qwen/Qwen1.5-0.5B".to_string(),
+        Which::Qwen1_8b => "Qwen/Qwen1.5-1.8B".to_string(),
+        Which::Qwen4b => "Qwen/Qwen1.5-4B".to_string(),
+        Which::Qwen7b => "Qwen/Qwen1.5-7B".to_string(),
+        Which::Qwen14b => "Qwen/Qwen1.5-14B".to_string(),
+        Which::Qwen72b => "Qwen/Qwen1.5-72B".to_string(),
+        Which::QwenMoeA27b => "Qwen/Qwen1.5-MoE-A2.7B".to_string(),       
     };
     let repo = api.repo(Repo::with_revision(
         model_id,
         RepoType::Model,
         req.revision.clone(),
     ));
-    let tokenizer_filename =  repo.get("tokenizer.json")?;
+    let tokenizer_filename = repo.get("tokenizer.json")?;
     
     let config_filename = repo.get("config.json")?;
     let filenames =  match req.model {
@@ -273,7 +269,6 @@ async fn generate(
 
     // Add a label for the language model's expected response
     let _ = writeln!(&mut formatted_prompt, "Assistant:");
-
     
     let sample_len = req.sample_len.clone();
     let mut generator = match set_model(data, req) {
@@ -302,9 +297,7 @@ async fn generate(
 async fn main() -> std::io::Result<()> {
     let device = candle_core::Device::new_cuda(0).unwrap();
 
-    let state = web::Data::new(AppState {
-        device,
-    });
+    let state = web::Data::new(AppState {device});
 
     use std::fs::File;
     use std::path::Path;
