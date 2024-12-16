@@ -1,8 +1,10 @@
 mod model;
+mod db;
 
 use anyhow::Ok;
+//use clap::builder::Str;
 use model::{TextGeneration, Model, Which};
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{delete, get, post, web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
 use anyhow::{Error as E, Result};
 use candle_transformers::models::gemma::{Config as ConfigGemma, Model as ModelGemma};
@@ -17,6 +19,13 @@ use actix_web::web::Bytes;
 use std::result::Result::Ok as ResultOk;
 use actix_web::middleware::Logger;
 use futures_util::stream::StreamExt;
+
+use sqlx::SqlitePool;
+//use sqlx::Error;
+use uuid::Uuid;
+use std::fmt::Write;
+use tokio_stream::wrappers::ReceiverStream;
+use actix_cors::Cors;
 
 
 #[derive(Serialize, Deserialize, Default)]
@@ -37,6 +46,21 @@ struct GenerateRequest {
 struct GenerateResponse {
     output: String,
 }
+
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
+struct Conversation {
+    id: i64,
+    conversation_id: String,
+    created_at: String,
+}
+
+
+
+// #[derive(Deserialize)]
+// struct NewMessage {
+//     sender: String,
+//     content: String,
+// }
 
 struct AppState {
     device: Device,
@@ -136,34 +160,142 @@ async fn hello() -> impl Responder {
     HttpResponse::Ok().body("Hello world!")
 }
 
+#[get("/conversations")]
+async fn fetch_all_conversations(pool: web::Data<SqlitePool>) -> impl Responder {
+    match db::get_all_conversation_ids(pool.get_ref()).await {
+        ResultOk(conversation_ids) => HttpResponse::Ok().json(conversation_ids),
+        Err(e) => {
+            eprintln!("Error fetching conversation IDs: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to fetch conversation IDs")
+        }
+    }
+}
 
-#[post("/generate")]
+#[get("/conversations/start")]
+async fn start_conversation(pool: web::Data<SqlitePool>) -> impl Responder {
+    let conversation_id = Uuid::new_v4().to_string();
+
+    let result = sqlx::query(
+        "INSERT INTO conversations (conversation_id) VALUES (?)",
+    )
+    .bind(&conversation_id)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        ResultOk(_) => HttpResponse::Created().json(conversation_id),
+        Err(e) => {
+            eprintln!("Error starting conversation: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to start conversation")
+        }
+    }
+}
+
+#[get("/conversations/{conversation_id}")]
+async fn view_conversation(
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let conversation_id = path.into_inner();
+
+    match db::get_conversation(pool.clone(), conversation_id).await {
+        ResultOk(messages) => HttpResponse::Ok().json(messages),
+        Err(e) => {
+            eprintln!("Error fetching conversation: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to fetch conversation")
+        }
+    }
+}
+
+#[delete("/conversations/{conversation_id}")]
+async fn delete_conversation(
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let conversation_id = path.into_inner();
+
+    let result = sqlx::query(
+        "DELETE FROM conversations WHERE conversation_id = ?",
+    )
+    .bind(conversation_id)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        ResultOk(_) => HttpResponse::Ok().finish(),
+        Err(e) => {
+            eprintln!("Error deleting conversation: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to delete conversation")
+        }
+    }
+}
+
+
+#[post("/conversations/{conversation_id}/generate")]
 async fn generate(
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
     data: web::Data<AppState>,
     req: web::Json<GenerateRequest>,
 ) -> impl Responder {
+    let conversation_id = path.into_inner();
+    let conversation = match db::get_conversation(pool.clone(), conversation_id.clone()).await {
+        ResultOk(conversation) => conversation,
+        Err(e) => {
+            eprintln!("Error fetching conversation: {:?}", e);
+            return HttpResponse::InternalServerError().body("Failed to fetch conversation history");
+        }
+    };
+
+    let mut formatted_prompt = String::new();
+    for message in conversation {
+        let _ = writeln!(
+            &mut formatted_prompt,
+            "{}: {}",
+            message.sender,
+            message.content
+        );
+    }
+
     let prompt = req.prompt.clone();
+    // Append the new user input
+    let _ = writeln!(&mut formatted_prompt, "User: {}", prompt);
+
+    sqlx::query(
+        r#"
+        INSERT INTO messages (conversation_id, sender, content) VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(&conversation_id)
+    .bind("User")
+    .bind(&prompt)
+    .execute(pool.get_ref()).await.expect("Failed to insert message into database");
+
+    // Add a label for the language model's expected response
+    let _ = writeln!(&mut formatted_prompt, "Assistant:");
+
+    
     let sample_len = req.sample_len.clone();
     let mut generator = match set_model(data, req) {
         ResultOk(gen) => gen,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {}", e)),
     };
-    let receiver = match generator.run(&prompt, sample_len) {
+    let receiver = match generator.run(&formatted_prompt, sample_len, pool.clone(), conversation_id.clone()) {
         ResultOk(recv) => recv,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {}", e)),
     };
-    
 
-    // Create a stream from the receiver
-    let stream = Box::pin(tokio_stream::iter(receiver).map(|token| {
-    // Convert each token into a Result<Bytes, anyhow::Error>
-        Result::<Bytes, anyhow::Error>::Ok(Bytes::from(token))
-    }));
+    // Wrap the receiver in a `ReceiverStream`
+    let stream = ReceiverStream::new(receiver).map(|token| {
+        println!("Token received: {}", token);
+        // Convert the token to bytes
+        Ok(Bytes::from(token)) as Result<Bytes, anyhow::Error>
+    });
 
     // Return the streaming response
     HttpResponse::Ok()
         .content_type("text/plain") 
-        .streaming(stream)
+        .streaming(Box::pin(stream))
 }
 
 #[actix_web::main]
@@ -174,14 +306,49 @@ async fn main() -> std::io::Result<()> {
         device,
     });
 
+    use std::fs::File;
+    use std::path::Path;
+
+    if !Path::new("src/conversations.db").exists() {
+        File::create("src/conversations.db").unwrap();
+        println!("Database created successfully");
+    } else {
+        println!("Database already exists");
+    }
+
+    let pool = match SqlitePool::connect("sqlite://src/conversations.db").await {
+        ResultOk(e) => e,
+        Err(e) => 
+        { 
+            eprintln!("Error connecting to database: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let _ = db::create_tables(&pool).await.map_err(|e| {
+        eprintln!("Error creating tables: {}", e);
+        std::process::exit(1);
+    });
+
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default()) // Logs HTTP requests and responses
+            .wrap(
+                Cors::default()
+                    .allow_any_origin() // Allow requests from any origin
+                    .allow_any_method() // Allow any HTTP method (e.g., GET, POST)
+                    .allow_any_header() // Allow any HTTP header
+            )
             .app_data(state.clone())
+            .app_data(web::Data::new(pool.clone()))
             .service(hello)
             .service(generate)
+            .service(start_conversation)
+            .service(fetch_all_conversations)
+            .service(view_conversation)
+            .service(delete_conversation)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
