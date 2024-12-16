@@ -290,7 +290,7 @@ impl TextGeneration {
                             eprintln!("Failed to send token"); // Log the error if sending fails
                         } // Send token text to the receiver
                     } else {
-                        eprintln!("Failed to get token");
+                      //  eprintln!("Failed to get token");
                     }
                 }
                 sqlx::query(
