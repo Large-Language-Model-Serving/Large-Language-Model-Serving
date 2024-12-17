@@ -3,6 +3,9 @@
 * Qi Zhang 1010190106  qqi.zhang@mail.utoronto.ca
 * Shidi Zhao 1003648378
 
+## Video Demo 
+https://youtu.be/rVQOfHuLHKM
+
 ## Motivation
 As industries increasingly use large language models (LLMs) for a variety of applications, from customer support chatbots to AI-driven content creation, there is a need for efficient, scalable backend infrastructure to support these models. This project aims to develop a platform that serves multiple LLMs, with streaming capabilities to enhance the user experience by reducing the waiting time for responses. Instead of waiting for an entire response, users will receive results in real-time, improving interactivity. Our team plans to build a robust, efficient back-end inference service that leverages Rust’s performance and safety.
 
