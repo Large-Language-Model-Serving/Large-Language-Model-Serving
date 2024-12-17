@@ -295,7 +295,7 @@ async fn generate(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let device = candle_core::Device::new_cuda(0).unwrap();
+    let device = candle_core::Device::new_metal(0).unwrap();
 
     let state = web::Data::new(AppState {device});
 
