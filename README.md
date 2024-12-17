@@ -14,7 +14,7 @@ The main objective is to design and implement a backend inference service in Rus
 ## Features
 Our project offers streaming support for inference results, a sqlite DB to store conversation history, simple interface for easy interaction and API endpoints for clients.
 
-Currently, our project only supports Mac with [Metal](https://support.apple.com/en-ca/102894) support.
+⚠️Currently, our project only supports Mac with [Metal](https://support.apple.com/en-ca/102894) support.
 
 
 
