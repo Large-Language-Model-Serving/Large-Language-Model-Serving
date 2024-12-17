@@ -17,7 +17,21 @@ The main objective is to design and implement a backend inference service in Rus
 ## Features
 Our project offers streaming support for inference results, a sqlite DB to store conversation history, simple interface for easy interaction and API endpoints for clients.
 
-⚠️Currently, our project only supports Mac with [Metal](https://support.apple.com/en-ca/102894) support.
+⚠️Currently, our project only supports MacOS with [Metal](https://support.apple.com/en-ca/102894) support and Windows with CUDA support (Default supports Mac).
+To run on Windows machines, change the setting in code to use cuda:
+```diff
+- let device = candle_core::Device::new_metal(0).unwrap();
++ let device = candle_core::Device::new_cuda(0).unwrap();
+```
+and in Cargo.toml, change the features to cuda:
+```diff
+- candle-nn = { git = "https://github.com/huggingface/candle.git", features = ["metal"]  }
+- candle-core = { git = "https://github.com/huggingface/candle.git", features = ["metal"] }
+- candle-transformers = { git = "https://github.com/huggingface/candle.git", features = ["metal"]  }
++ candle-nn = { git = "https://github.com/huggingface/candle.git", features = ["cuda"]  }
++ candle-core = { git = "https://github.com/huggingface/candle.git", features = ["cuda"] }
++ candle-transformers = { git = "https://github.com/huggingface/candle.git", features = ["cuda"]  }
+```
 
 
 
