@@ -39,10 +39,21 @@ and in Cargo.toml, change the features to cuda:
 ```
 
 ## Reproducibility Guide
+1. Download the code
+2. Unzip the file if downloaded zip file
+3. Move to the backend directory
+4. Run command in terminal
+   ```bash
+   cargo run
+   ```
+5. Wait until the server successfully runs (i.e. listening on: 127.0.0.1:8080)
+6. Open index.html in your browser
+7. Try our project
 
-## User’s Guide
 
 ⚠️ When using a model for the first time, it would take some time to download and build the model. This problem will not occur after the first use.
+
+## User’s Guide
 
 ### Interface
 
@@ -106,3 +117,4 @@ It posts a request in json format like the following, and gets a stream of words
 Qi:
 
 ## Lessons learned and concluding remarks
+
