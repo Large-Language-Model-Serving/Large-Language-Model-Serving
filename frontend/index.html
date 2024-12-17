@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Large Language Model Serving</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <div class="container">
+    <div class="sidebar">
+      <button id="newConversationBtn">New Conversation</button>
+      <div id="conversationsList"></div>
+    </div>
+    <div class="main-content">
+      <h1>Large Language Model Serving</h1>
+      <div id="output"></div>
+      <div class="input-container">
+        <select id="modelSelect">
+          <!-- Qwen Models -->
+          <option value="Qwen0_5b">Qwen 0.5B</option>
+          <option value="Qwen1_8b">Qwen 1.8B</option>
+          <option value="Qwen4b">Qwen 4B</option>
+          <option value="Qwen7b">Qwen 7B</option>
+          <option value="Qwen14b">Qwen 14B</option>
+          <option value="Qwen72b">Qwen 72B</option>
+          <option value="QwenMoeA27b">Qwen MoE A2.7B</option>
+          <option value="Qwen2_0_5b">Qwen2 0.5B</option>
+          <option value="Qwen2_1_5b">Qwen2 1.5B</option>
+          <option value="Qwen2_7b">Qwen2 7B</option>
+          <option value="Qwen2_72b">Qwen2 72B</option>
+
+          <!-- Gemma Models -->
+          <option value="Gemma2B">Gemma 2B</option>
+          <option value="Gemma7B">Gemma 7B</option>
+          <option value="GemmaInstruct2B">Gemma 2B Instruct</option>
+          <option value="GemmaInstruct7B">Gemma 7B Instruct</option>
+          <option value="GemmaInstructV1_1_2B">Gemma 1.1 2B Instruct</option>
+          <option value="GemmaInstructV1_1_7B">Gemma 1.1 7B Instruct</option>
+          <option value="GemmaCode2B">Gemma Code 2B</option>
+          <option value="GemmaCode7B">Gemma Code 7B</option>
+          <option value="GemmaCodeInstruct2B">Gemma Code 2B Instruct</option>
+          <option value="GemmaCodeInstruct7B">Gemma Code 7B Instruct</option>
+          <option value="Gemma2_2B">Gemma2 2B</option>
+          <option value="Gemma2Instruct2B">Gemma2 2B Instruct</option>
+          <option value="Gemma2_9B">Gemma2 9B</option>
+          <option value="Gemma2Instruct9B">Gemma2 9B Instruct</option>
+        </select>
+        <input type="text" id="userInput" placeholder="Enter your prompt here" />
+        <button id="sendButton">Send</button>
+      </div>
+    </div>
+    <div class="parameters-sidebar">
+      <h3>Model Parameters</h3>
+      <div class="parameter-group">
+        <label for="sampleLen">Sample Length:</label>
+        <input type="number" id="sampleLen" value="300" min="1" max="2048">
+      </div>
+      <div class="parameter-group">
+        <label for="temperature">Temperature:</label>
+        <input type="number" id="temperature" value="0.7" min="0" max="2" step="0.1">
+      </div>
+      <div class="parameter-group">
+        <label for="topP">Top P:</label>
+        <input type="number" id="topP" value="0.9" min="0" max="1" step="0.1">
+      </div>
+      <div class="parameter-group">
+        <label for="repeatPenalty">Repeat Penalty:</label>
+        <input type="number" id="repeatPenalty" value="1.2" min="0" max="2" step="0.1">
+      </div>
+      <div class="parameter-group">
+        <label for="repeatLastN">Repeat Last N:</label>
+        <input type="number" id="repeatLastN" value="50" min="0" max="2048">
+      </div>
+      <div class="parameter-group">
+        <label for="revision">Revision:</label>
+        <input type="text" id="revision" value="main">
+      </div>
+      <div class="parameter-group">
+        <label for="seed">Seed:</label>
+        <input type="number" id="seed" value="42" min="0">
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+
+</html>
