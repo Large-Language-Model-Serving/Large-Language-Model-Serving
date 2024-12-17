@@ -43,7 +43,14 @@ and in Cargo.toml, change the features to cuda:
 
 
 ## User’s Guide
+⚠️ When using a model for the first time, it would take some time to download and build the model. This problem will not occur after the first use.
 ### Interface
+Here is the basic chat inferface for our model.
+![image](https://github.com/user-attachments/assets/7e366339-05e5-44fe-8fb8-bfde0a0c78d0)
+To start conversation, click the "New Conversation" button on the top left corner.
+Then, you can select the model you prefer and enter the prompt below, you can also change the parameters to the right. 
+![image](https://github.com/user-attachments/assets/1e4a191e-6d17-4792-8e59-79f0ef35121f)
+After the conversation, you can delete the conversation by clicking the delete button, or leave it there for viewing it next time.
 
 
 ### API
