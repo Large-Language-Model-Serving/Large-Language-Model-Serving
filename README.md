@@ -47,7 +47,7 @@ and in Cargo.toml, change the features to cuda:
    cargo run
    ```
 5. Wait until the server successfully runs (i.e. listening on: 127.0.0.1:8080)
-6. Open index.html in your browser
+6. Go to the frontend directory and open index.html in your browser
 7. Try our project
 
 
