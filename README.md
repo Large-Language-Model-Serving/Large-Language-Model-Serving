@@ -142,6 +142,11 @@ It posts a request in json format like the following, and gets a stream of words
 
 ### Qi
 
+* Implemented API endpoints
+* Implemented inference result streaming
+* Implemented conversation history storage
+* Implemented large language model management.
+
 ### Shidi
 
 * Investigated and decided the framework to use
