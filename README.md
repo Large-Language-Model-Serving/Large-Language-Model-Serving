@@ -127,7 +127,7 @@ It posts a request in json format like the following, and gets a stream of words
 ```bash
     {
         "prompt": "Hello, world!",
-        "sample_len": 100,
+        "sample_len": 300,
         "temperature": 0.7,
         "top_p": 0.9,
         "repeat_penalty": 1.2,
@@ -140,7 +140,10 @@ It posts a request in json format like the following, and gets a stream of words
 
 ## Contributions by each team member
 
-Qi:
+### Qi
 
-Shidi:
+### Shidi
 
+* Investigated and decided the framework to use
+* Set up the basic code for one model inferencing
+* Implemented the front-end for all features
