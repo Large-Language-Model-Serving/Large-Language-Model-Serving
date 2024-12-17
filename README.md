@@ -40,6 +40,43 @@ and in Cargo.toml, change the features to cuda:
 
 ## Reproducibility Guide
 
+### Prerequiste
+
+* Make sure the Rust environment is properly set up on your machine.
+* Ensure SQLite is installed on your Mac machine.
+
+### Detailed steps
+
+1. Clone the repository to your local Mac machine:
+
+   ```bash
+   git clone https://github.com/Large-Language-Model-Serving/Large-Language-Model-Serving.git
+   ```
+
+2. Navigate to the backend folder:
+
+   ```bash
+   cd backend
+   ```
+
+3. Build the backend in release mode:
+
+   ```bash
+   cargo build --release
+   ```
+
+4. Start the backend server:
+
+   ```bash
+   ./target/release/back-end-inference-service
+   ```
+
+5. Open the frontend page in your default web browser:
+
+   ```plaintext
+   frontend/index.html
+   ```
+
 ## User’s Guide
 
 ⚠️ When using a model for the first time, it would take some time to download and build the model. This problem will not occur after the first use.
