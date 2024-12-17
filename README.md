@@ -142,4 +142,5 @@ It posts a request in json format like the following, and gets a stream of words
 
 Qi:
 
-## Lessons learned and concluding remarks
+Shidi:
+
